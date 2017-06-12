@@ -1,56 +1,188 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+"""Computer Vision based lane detection
+
+In this project, the radius of curvature of the road ahead and the
+vehicle offset with respect to lane-centre position are infered, using a
+histogram based sliding window approach, applied to infer probability of lane
+marking pixels, followed by a second degree polynomial fit of the found left and
+ right lane markings in a perspectively corrected top-down (bird's eye) view.
+"""
+__author__ = "Lyuboslav Petrov"
+
 import os
 import sys
 import glob
 import cv2
+import time
 import pickle
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
+from Queue import Queue
 
+# =================================Helpers=====================================#
 def catch_user_interrupt(wait_time=1):
+    """
+    OpenCV specific high-gui window interruption handler
+    """
     ch = 0xFF & cv2.waitKey(wait_time)
     return True if ch == 27 else False
 
-def get_perspective_matrix(src=[], dst=[], height=720):
-    if len(src) < 1:
-        src = np.float32([[200, height],
-            [1100, height],
-            [595, 450],
-            [685, 450]])
-    if len(dst) < 1:
-        dst = np.float32([[300, height],
-            [980, height],
-            [300, 0],
-            [980, 0]])
+def draw_str(img, (x, y), s, scale=0.3):
+
+    cv2.putText(img, s, (x, y), cv2.FONT_HERSHEY_PLAIN, scale, (255, 255, 255),
+                lineType=cv2.LINE_AA)
+    cv2.putText(img, s, (x+1, y+1), cv2.FONT_HERSHEY_PLAIN, scale, (0, 0, 0),
+                thickness=1, lineType=cv2.LINE_AA)
+# =============================================================================#
+
+# ===============================Business Logic================================#
+def get_calib_data(path, nx=9, ny=5):
+    """
+    Computes camera calibration data given the path to the images folder
+
+    Parameters
+    ----------
+    path : string
+        Path to calibration images folder
+    nx : int
+        Number of inner edges along x dimension
+    ny : int
+        Number of inner edges along y dimension
+
+    Returns
+    -------
+    calibration_data: dict
+        Dictionary of all infered data
+
+    """
+
+    # Make a list of calibration images
+    imgs = glob.glob(os.path.join(path, '*.jpg'))
+
+    objpoints = []
+    imgpoints = []
+    imgnames = []
+
+    objp = np.zeros((nx*ny,3), np.float32)
+    objp[:,:2] = np.mgrid[0:nx,0:ny].T.reshape(-1,2)
+
+    for impath in imgs:
+        imgnames.append(os.path.split(impath)[-1])
+        img = cv2.imread(impath)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Find the chessboard corners
+        ret, corners = cv2.findChessboardCorners(gray, (nx, ny), None)
+        # If found, draw corners
+        if ret == True:
+            # Draw and display the corners
+#             cv2.drawChessboardCorners(img, (nx, ny), corners, ret)
+            imgpoints.append(corners)
+            objpoints.append(objp)
+    #         plt.imshow(img)
+
+    # Compute distortion corrections
+    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
+        objpoints, imgpoints, gray.shape[::-1],None,None)
+
+    cdata = {
+        "imgnames": imgnames,
+        "objpoints": objpoints,
+        "imgpoints": imgpoints,
+        "results":{
+            "ret": ret,
+            "mtx": mtx,
+            "dist": dist,
+            "rvecs": rvecs,
+            "tvecs": tvecs
+        }
+    }
+
+    # Save the data at the same location
+    with open(os.path.join(path, 'cdata.p'),  'w') as fid:
+        pickle.dump(cdata, fid)
+
+    return cdata
+
+def get_perspective_matrix(src=[], dst=[]):
+    """
+    Finds the perspective distortion matrix and its inverse
+
+    Parameters
+    ----------
+    src : ndarray
+        Array carying the four source points
+    dst : ndarray
+        Array for the destination (unwarped) points
+
+    Returns
+    -------
+    M : ndarray
+        The perspective distortion matrix
+    M_INV : ndarray
+        The inverse perspective distortion matrix
+    """
     M = cv2.getPerspectiveTransform(src, dst)
     M_INV = cv2.getPerspectiveTransform(dst, src)
     return M, M_INV
 
 def warp(img, M):
-    (width, height) = (img.shape[1], img.shape[0])
+    """
+    Warp an image given a perspective distortion matrix
+
+    Parameters
+    ----------
+    img : ndarray
+        Input image to warp
+    M : ndarray
+        Distortion coefficient matrix
+
+    Returns
+    -------
+    warped : ndarray
+        The warped `img`
+    """
+    (height, width) = img.shape[:2]
     warped = cv2.warpPerspective(img, M, (width, height), flags=cv2.INTER_LINEAR)
     return warped
 
-# Edit this function to create your own pipeline.
-def binirize(img, s_thresh=(170, 255), sx_thresh=(20, 100)):
+def binarize(img, s_thresh=(170, 255), edge_thresh=(20, 100)):
+    """
+    Combined color and edge based masking
+
+    Parameters
+    ----------
+    img : ndarray
+        Input image
+    s_thresh : tuple
+        The lower and upper thresholds for the S channel
+    edge_thresh : tuple
+        Lower and upper thresholds for the sobel filter on the L channel
+
+    Returns
+    -------
+    binary : ndarray
+        The binirized combined mask
+    """
+
     img = np.copy(img)
-    # Convert to HSV color space and separate the V channel
-    hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HLS).astype(np.float)
-    l_channel = hsv[:,:,1]
-    s_channel = hsv[:,:,2]
+    # Convert to HLS color space and separate the V channel
+    H,L,S = cv2.split(cv2.cvtColor(img, cv2.COLOR_RGB2HLS).astype(np.float))
     # Sobel x
-    sobelx = cv2.Sobel(l_channel, cv2.CV_64F, 1, 0) # Take the derivative in x
-    abs_sobelx = np.absolute(sobelx) # Absolute x derivative to accentuate lines away from horizontal
+    sobelx = cv2.Sobel(L, cv2.CV_64F, 1, 0)
+    abs_sobelx = np.absolute(sobelx)
     scaled_sobel = np.uint8(255*abs_sobelx/np.max(abs_sobelx))
 
     # Threshold x gradient
     sxbinary = np.zeros_like(scaled_sobel)
-    sxbinary[(scaled_sobel >= sx_thresh[0]) & (scaled_sobel <= sx_thresh[1])] = 1
+    sxbinary[(scaled_sobel >= edge_thresh[0]) & (scaled_sobel <= edge_thresh[1])] = 1
 
     # Threshold color channel
-    s_binary = np.zeros_like(s_channel)
-    s_binary[(s_channel >= s_thresh[0]) & (s_channel <= s_thresh[1])] = 1
+    s_binary = np.zeros_like(S)
+    s_binary[(S >= s_thresh[0]) & (S <= s_thresh[1])] = 1
 
     sxbinary = sxbinary.astype(np.float) - sxbinary.astype(np.float).min()
     sxbinary /= sxbinary.max()
@@ -58,14 +190,8 @@ def binirize(img, s_thresh=(170, 255), sx_thresh=(20, 100)):
     s_binary /= s_binary.max()
 
     color_binary = np.dstack(( np.zeros_like(sxbinary), sxbinary, s_binary))
-    return color_binary.sum(axis=2).astype(np.uint8) * 255
-
-def get_vehicle_offset(img, left_fit, right_fit, xmppx=3.7/700):
-    (height, width) = img.shape[:2]
-    left_line = np.polyval(left_fit, height-1)
-    right_line = np.polyval(right_fit, height-1)
-    vehicle_offset = width / 2.0 - (left_line + right_line)/2
-    return vehicle_offset * xmppx
+    binary = color_binary.sum(axis=2).astype(np.uint8) * 255
+    return binary
 
 def initial_line_fit(binary_warped, nwindows=9, margin=100, minpix=50, polyorder=2):
     """
@@ -175,7 +301,7 @@ def initial_line_fit(binary_warped, nwindows=9, margin=100, minpix=50, polyorder
     'right_fit':right_fit,
     'nonzerox': nonzerox,
     'nonzeroy': nonzeroy,
-    # 'out_img': out_img,
+    'out_img': out_img,
     'left_lane_inds': left_lane_inds,
     'right_lane_inds': right_lane_inds
     }
@@ -227,6 +353,12 @@ def fast_fit(binary_warped, left_fit, right_fit, margin=100, min_pts=10):
     'right_lane_inds': right_lane_inds
     }
 
+def get_vehicle_offset(img, left_fit, right_fit, xmppx=3.7/700):
+    (height, width) = img.shape[:2]
+    left_line = np.polyval(left_fit, height-1)
+    right_line = np.polyval(right_fit, height-1)
+    vehicle_offset = width / 2.0 - (left_line + right_line)/2
+    return vehicle_offset * xmppx
 
 def compute_curvature(line_fit_dict, xm_per_pix=3.7/700, ym_per_pix=30.0/720):
     """
@@ -290,39 +422,101 @@ def visualize_results(undist, line_fit_dict, M_INV, curvatures, vehicle_offset):
 
     # Annotate lane curvature values and vehicle offset from center
     avg_curve = (curvatures[0] + curvatures[1]) / 2.0
-    label_str = 'Radius of curvature: %.1f m' % avg_curve
-    result = cv2.putText(output, label_str, (30,40), 0, 1, (0,0,0), 2, cv2.LINE_AA)
-
-    label_str = 'Vehicle offset from lane center: %.1f m' % vehicle_offset
-    result = cv2.putText(output, label_str, (30,70), 0, 1, (0,0,0), 2, cv2.LINE_AA)
+    _str = 'Mean Curvature: %.1f m' % avg_curve
+    draw_str(output, (20,30), _str, scale=1.0)
+    _str = 'Vehicle offset: %.1f m' % vehicle_offset
+    draw_str(output, (20,60), _str, scale=1.0)
 
     return output
 
-def pipe(img, cdata, M, M_INV,  s_thresh=(80, 255), sx_thresh=(35, 100), line_fit_dict={'status': False}):
+def movav(Q, data, stds=4, axis_thresh=1.5):
+    """
+    Moving average of a queue with outlier rejection
+
+    Outliers  lying `stds` standard  deviations away from the mean of the queue
+    are discarded.
+
+    Parameters
+    ----------
+    Q : Queue.Queue object
+        A Queue object
+    data : ndarray
+        A queue item candidate
+    stds : int
+        Number of standard deviations for rejection threshold
+    axis_thresh : float
+        Threshold for number of correct axes of `data` (within the `stds` standard
+        deviations) in order to at an element to the queue `Q`
+
+    Returns
+    -------
+    movav : ndarray
+        The average of the filtered queue
+    """
+    if Q.full():
+        Q.get()
+
+    if len(Q.queue) < (Q.maxsize)-1:
+        Q.put(data)
+    else:
+        current_mean = np.mean(Q.queue, axis=0)
+        current_std = np.std(Q.queue, axis=0)
+        cond = np.abs(data - current_mean) < (stds * current_std)
+        if cond.sum() >= axis_thresh:
+            # print("{}: Added new frame".format(time.time()))
+            Q.put(data)
+        # else:
+            # print("{}:Discarded outlier frame".format(time.time()))
+
+    return np.mean(Q.queue, axis=0)
+
+def pipe(img, cdata, M, M_INV, line_fit_dict={'status': False}):
+    """
+    Combine all procedures for lane detection
+
+    Parameters
+    ----------
+    img : ndarray
+        Input image (presumably of the road)
+    cdata : dict
+        A dictionary of camera calibration coefficients
+    M : ndarray
+        Perspective distortion coefficients
+    M_INV : ndarray
+        The inverse perspective distortion coefficients
+    line_fit_dict : dict
+        Previos output dictionary. Used to determine if a complete step or must
+        be made or only a fast fit, using previos measurements
+
+    Returns
+    -------
+    line_fit_dict : dict
+        Dictionary outputs
+    """
 
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    # warped, m_inv = unwarp(img,cdata['results']['mtx'], cdata['results']['dist'])
+
+    # Step 1: Lens Distortion Correction
     undist = cv2.undistort(img, cdata['results']['mtx'],
         cdata['results']['dist'], None, cdata['results']['mtx'])
 
-    binirized = binirize(undist, s_thresh=s_thresh, sx_thresh=sx_thresh)
+    # Step 2: Combined Binary Masking
+    binarized = binarize(undist)
 
-    warped = warp(binirized, M)
+    # Step 3: Perspective Distortion Correction
+    warped = warp(binarized, M)
 
-
+    # Step 4: Histogram based sliding window line fit
     if line_fit_dict['status']:
+        # If previos step was successful
         line_fit_dict = fast_fit(warped,
                                 line_fit_dict['left_fit'],
                                 line_fit_dict['right_fit'])
     else:
+        # Else, perform initial computation
         line_fit_dict = initial_line_fit(warped)
 
-    if line_fit_dict['status']:
-        vehicle_offset = get_vehicle_offset(img,
-            line_fit_dict['left_fit'], line_fit_dict['right_fit'])
-        curvatures = compute_curvature(line_fit_dict)
-        img = visualize_results(undist, line_fit_dict, M_INV, curvatures, vehicle_offset)
-    return line_fit_dict, img
+    return line_fit_dict, undist
 
 def parser():
     parser = argparse.ArgumentParser(description="""
@@ -365,65 +559,135 @@ def parser():
         """
     )
 
+    parser.add_argument(
+        '-f',
+        type=int,
+        default=0,
+        dest='frame',
+        help="""Start Video from frame number `-f`
+        """
+    )
+
     args = parser.parse_args()
     return args
 
+def main():
 
-if __name__ == "__main__":
+    # Queues for holding lane estimate values
+    MAX_Q_SIZE = 5
+    Q_left = Queue(maxsize=MAX_Q_SIZE)
+    Q_right = Queue(maxsize=MAX_Q_SIZE)
 
     args = parser()
 
-    with open(args.cdata, 'r') as fid:
-        cdata = pickle.load(fid)
+    if args.cdata:
+        try:
+            with open(args.cdata, 'r') as fid:
+                cdata = pickle.load(fid)
+        except:
+            print("Calibration data file not found or invalid.")
+            return 1
+    else:
+        print("No precomputed calibration data given.")
+
+        ans  = raw_input('Do you want to compute calibration data now (N/y): ')
+        if not 'y' in ans.lower():
+            return 1
+
+        cdata = get_calib_data('camera_cal')
+
     src = np.float32([
-        [200, 720],
-        [1150, 720],
-        [580, 450],
-        [700, 450]])
-    M, M_INV = get_perspective_matrix(src=src)
+        [595, 450],
+        [685, 450],
+        [1100, 720],
+        [200, 720]])
+    dst = np.float32([
+        [300, 0],
+        [980, 0],
+        [980, 720],
+        [300, 720]])
+
+    M, M_INV = get_perspective_matrix(src=src, dst=dst)
+
     line_fit_dict = {'status': False}
+
     if args.image is not None:
         try:
             img = cv2.imread(args.image)
         except:
             print("Image not found or invalid")
-            sys.exit(1)
+            return 1
 
-        lane_fit_dict, drawn = pipe(img, cdata, M, M_INV, line_fit_dict=line_fit_dict)
-        plt.imshow(drawn)
-        plt.show()
-        sys.exit(0)
+        lane_fit_dict, undist = pipe(img, cdata, M, M_INV,
+            line_fit_dict=line_fit_dict)
+        if line_fit_dict['status']:
+            vehicle_offset = get_vehicle_offset(undist,
+                line_fit_dict['left_fit'], line_fit_dict['right_fit'])
+            curvatures = compute_curvature(line_fit_dict)
+            img = visualize_results(undist, line_fit_dict, M_INV, curvatures,
+                vehicle_offset)
+            plt.imshow(drawn)
+            plt.show()
+        return 0
 
     cap = cv2.VideoCapture(args.input)
-    ret, frame = cap.read()
-
+    if args.frame:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, args.frame)
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
+
     if args.output is not None:
         if os.path.exists(args.output):
-            ans  = raw_input('Video with same name exists. Do you want to override it (N/y): ')
+            ans  = raw_input('Video exists. Do you want to override it (N/y): ')
             if not 'y' in ans.lower():
-                sys.exit(1)
-        out = cv2.VideoWriter(
+                return 1
+        writer = cv2.VideoWriter(
             args.output,
             fourcc,
             cap.get(cv2.CAP_PROP_FPS),
-            (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+            (
+                int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            )
         )
+    else:
+        writer = None
 
     while cap.isOpened():
-        line_fit_dict = {'status': False}
         ret, frame = cap.read()
         if not ret:
             break
-        line_fit_dict, analyzed = pipe(frame, cdata, M, M_INV, line_fit_dict=line_fit_dict)
+        line_fit_dict, undist = pipe(frame, cdata, M, M_INV,
+            line_fit_dict=line_fit_dict)
+
+        if line_fit_dict['status']:
+            # Average out the line estimations over `MAX_Q_SIZE` measurements
+            left, right = line_fit_dict['left_fit'], line_fit_dict['right_fit']
+            left, right = movav(Q_left, left), movav(Q_right, right)
+            line_fit_dict['left_fit'], line_fit_dict['right_fit'] = left, right
+            # Now compute offset and curvatures based on more stable readings
+            vehicle_offset = get_vehicle_offset(undist,
+                line_fit_dict['left_fit'], line_fit_dict['right_fit'])
+            curvatures = compute_curvature(line_fit_dict)
+            analyzed = visualize_results(undist, line_fit_dict, M_INV, curvatures,
+                vehicle_offset)
+        else:
+            analyzed  = frame
+        _str = "Frame: {}".format(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        draw_str(analyzed, (20,90), _str, scale=1.0)
         analyzed = cv2.cvtColor(analyzed, cv2.COLOR_RGB2BGR)
-        if args.output is not None:
-            out.write(analyzed)
+        if writer:
+            writer.write(analyzed)
         cv2.imshow('video', analyzed)
         if catch_user_interrupt():
             break
 
-    if args.output is not None:
-        out.release()
+    if writer:
+        writer.release()
     cap.release()
     cv2.destroyAllWindows()
+
+    return 0
+# ============================================================================#
+
+if __name__ == "__main__":
+    sys.exit( main() )

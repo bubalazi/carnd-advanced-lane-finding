@@ -16,6 +16,20 @@ Pipeline Summary
 Please find a detailed description of the algorithm within the standalone [WriteUp.html](./WriteUp.html) page, or execute step by step the pipeline with the notebook [WriteUp.ipynb](./WriteUp.ipynb).
 
 Usage:
+    ./lane_detect_pipe.py
+
+    usage: lane_detect_pipe.py [-h] [-i IMAGE] [-v INPUT] [-o OUTPUT] [-c CDATA]
+                               [-f FRAME]
+
+    Pure computer vision implementation for road curvature estimation
+
+    optional arguments:
+      -h, --help  show this help message and exit
+      -i IMAGE    Input image
+      -v INPUT    Input video
+      -o OUTPUT   Output video
+      -c CDATA    Camera Calibration data
+      -f FRAME    Start Video from frame number `-f`
 
     # Execute on a single image
     python lane_detect_pipe.py -i test_images/test1.jpg
@@ -24,4 +38,4 @@ Usage:
     python lane_detect_pipe.py -v project_video.mp4
 
     # Save the output
-    python lane_detect_pipe.py -v project_video.mp4 -o output/my-test-video.mp4
+    python lane_detect_pipe.py -v project_video.mp4 -o output/my-test-video.avi
