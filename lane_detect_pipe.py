@@ -149,7 +149,7 @@ def warp(img, M):
     warped = cv2.warpPerspective(img, M, (width, height), flags=cv2.INTER_LINEAR)
     return warped
 
-def binarize(img, s_thresh=(170, 255), edge_thresh=(20, 100)):
+def binarize(img, s_thresh=(80, 255), edge_thresh=(35, 100)):
     """
     Combined color and edge based masking
 
@@ -530,7 +530,7 @@ def parser():
     args = parser.parse_args()
     return args
 
-def movav(Q, data, stds=6, axis_thresh=1):
+def movav(Q, data, stds=4, axis_thresh=1):
     """
     Moving average of a queue with outlier rejection
 
@@ -559,22 +559,22 @@ def movav(Q, data, stds=6, axis_thresh=1):
 
     if len(Q.queue) < (Q.maxsize):
         Q.put(data)
-    else:
-        current_mean = np.mean(Q.queue, axis=0)
-        current_std = np.std(Q.queue, axis=0)
-        cond = np.abs(data - current_mean) < (stds * current_std)
-        if cond.sum() >= axis_thresh:
-            print("{}: Added new frame".format(time.time()))
-            Q.put(data)
-        else:
-            print("{}:Discarded outlier frame".format(time.time()))
+    # else:
+    #     current_mean = np.mean(Q.queue, axis=0)
+    #     current_std = np.std(Q.queue, axis=0)
+    #     cond = np.abs(data - current_mean) < (stds * current_std)
+    #     if cond.sum() >= axis_thresh:
+    #         print("{}: Added new frame".format(time.time()))
+    #         Q.put(data)
+    #     else:
+    #         print("{}:Discarded outlier frame".format(time.time()))
 
     return np.mean(Q.queue, axis=0)
 
 def main():
 
     # Queues for holding lane estimate values
-    MAX_Q_SIZE = 12
+    MAX_Q_SIZE = 5
     Q_left = Queue(maxsize=MAX_Q_SIZE)
     Q_right = Queue(maxsize=MAX_Q_SIZE)
 
@@ -597,10 +597,11 @@ def main():
         cdata = get_calib_data('camera_cal')
 
     src = np.float32([
-        [595, 450],
-        [685, 450],
-        [1100, 720],
+        [580, 450],
+        [700, 450],
+        [1150, 720],
         [200, 720]])
+
     dst = np.float32([
         [300, 0],
         [980, 0],
