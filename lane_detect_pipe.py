@@ -429,47 +429,6 @@ def visualize_results(undist, line_fit_dict, M_INV, curvatures, vehicle_offset):
 
     return output
 
-def movav(Q, data, stds=4, axis_thresh=1.5):
-    """
-    Moving average of a queue with outlier rejection
-
-    Outliers  lying `stds` standard  deviations away from the mean of the queue
-    are discarded.
-
-    Parameters
-    ----------
-    Q : Queue.Queue object
-        A Queue object
-    data : ndarray
-        A queue item candidate
-    stds : int
-        Number of standard deviations for rejection threshold
-    axis_thresh : float
-        Threshold for number of correct axes of `data` (within the `stds` standard
-        deviations) in order to at an element to the queue `Q`
-
-    Returns
-    -------
-    movav : ndarray
-        The average of the filtered queue
-    """
-    if Q.full():
-        Q.get()
-
-    if len(Q.queue) < (Q.maxsize)-1:
-        Q.put(data)
-    else:
-        current_mean = np.mean(Q.queue, axis=0)
-        current_std = np.std(Q.queue, axis=0)
-        cond = np.abs(data - current_mean) < (stds * current_std)
-        if cond.sum() >= axis_thresh:
-            # print("{}: Added new frame".format(time.time()))
-            Q.put(data)
-        # else:
-            # print("{}:Discarded outlier frame".format(time.time()))
-
-    return np.mean(Q.queue, axis=0)
-
 def pipe(img, cdata, M, M_INV, line_fit_dict={'status': False}):
     """
     Combine all procedures for lane detection
@@ -571,10 +530,51 @@ def parser():
     args = parser.parse_args()
     return args
 
+def movav(Q, data, stds=6, axis_thresh=1):
+    """
+    Moving average of a queue with outlier rejection
+
+    Outliers  lying `stds` standard  deviations away from the mean of the queue
+    are discarded.
+
+    Parameters
+    ----------
+    Q : Queue.Queue object
+        A Queue object
+    data : ndarray
+        A queue item candidate
+    stds : int
+        Number of standard deviations for rejection threshold
+    axis_thresh : float
+        Threshold for number of correct axes of `data` (within the `stds` standard
+        deviations) in order to at an element to the queue `Q`
+
+    Returns
+    -------
+    movav : ndarray
+        The average of the filtered queue
+    """
+    if Q.full():
+        Q.get()
+
+    if len(Q.queue) < (Q.maxsize):
+        Q.put(data)
+    else:
+        current_mean = np.mean(Q.queue, axis=0)
+        current_std = np.std(Q.queue, axis=0)
+        cond = np.abs(data - current_mean) < (stds * current_std)
+        if cond.sum() >= axis_thresh:
+            print("{}: Added new frame".format(time.time()))
+            Q.put(data)
+        else:
+            print("{}:Discarded outlier frame".format(time.time()))
+
+    return np.mean(Q.queue, axis=0)
+
 def main():
 
     # Queues for holding lane estimate values
-    MAX_Q_SIZE = 5
+    MAX_Q_SIZE = 12
     Q_left = Queue(maxsize=MAX_Q_SIZE)
     Q_right = Queue(maxsize=MAX_Q_SIZE)
 
